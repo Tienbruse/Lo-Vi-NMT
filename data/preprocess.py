@@ -120,12 +120,12 @@ class NMTPreprocessor:
         # Xử lý ngôn ngữ nguồn
         for lang in self.src_langs:
             input_file = self.data_dir / f"{dataset}.{lang}"
-            output_file = self.output_dir / f"{dataset}.bpe.{lang}"
+            output_file = self.output_dir / f"{dataset}.{lang}"
             self.apply_sentencepiece(input_file, output_file)
         
         # Xử lý ngôn ngữ đích (tiếng Việt)
         input_file = self.data_dir / f"{dataset}.{self.tgt_lang}"
-        output_file = self.output_dir / f"{dataset}.tok.{self.tgt_lang}"
+        output_file = self.output_dir / f"{dataset}.{self.tgt_lang}"
         self.apply_moses_vi(input_file, output_file)
 
     def preprocess_all(self) -> None:
