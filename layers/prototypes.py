@@ -102,7 +102,6 @@ class MultiHeadAttention(nn.Module):
     
 #        d_k = q.shape[-1]
         scores = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(self.d_k)
-        
         if mask is not None:
             mask = mask.unsqueeze(1) # add a dimension to account for head
             scores = scores.masked_fill(mask==0, -1e9)
