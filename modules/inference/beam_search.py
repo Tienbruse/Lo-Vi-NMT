@@ -120,34 +120,66 @@ class BeamSearch(DecodeStrategy):
         return outputs, log_scores
 
     def replace_unknown(self, outputs, sentences, attn, selector_tuple, unknown_token="<unk>"):
-        """Replace the unknown words in the outputs with the highest valued attentionized words.
+        """
+        Replace the unknown words in the outputs with the highest valued attentionized words.
         Args:
             outputs: the output from decoding. [batch, beam] of list of str
             sentences: the original wordings of the sentences. [batch_size, src_len] of str
-            attn: the attention received, in the form of list:  [layers units of (self-attention, attention) with shapes of [batchbeam, heads, tgt_len, tgt_len] & [batchbeam, heads, tgt_len, src_len] respectively]
+            attn: the attention received, in the form of list: [layers units of (self-attention, attention) with shapes of [batchbeam, heads, tgt_len, tgt_len] & [batchbeam, heads, tgt_len, src_len] respectively]
             selector_tuple: (layer, head) used to select the attention
             unknown_token: token used for checking. str
         Returns:
             the replaced version, in the same shape as outputs
-            """
-
-#        is_finished = torch.LongTensor([[self.TRG.vocab.stoi['<eos>']] for i in range(self.beam_offset)]).view(-1).to(self.device)
-#        unk_token = self.SRC.vocab.stoi['<unk>']
+        """
         layer_used, head_used = selector_tuple
-        used_attention = attn[layer_used][-1][:, head_used] # it should be [batchbeam, tgt_len, src_len], as we are using the attention to source
-        flattened_outputs = outputs.reshape((-1, )) # flatten the outputs back to batchbeam
-
-        select_id_src = torch.argmax(used_attention, dim=-1).cpu().numpy() # [batchbeam, tgt_len] of best indices. Also convert to numpy version (remove sos not needed as it is attention of outputs)
-        beam_size = select_id_src.shape[0] // len(sentences) # used custom-calculated beam_size as we might not output the entirety of beams. See beam_search fn for details
-        # select per batchbeam. source batch id is found by dividing batchbeam id per beam; we are selecting [tgt_len] indices from [src_len] tokens; then concat at the first dimensions to retrieve [batch_beam, tgt_len] of replacement tokens
-        # need itemgetter / map to retrieve from list
-        replace_tokens = [ operator.itemgetter(*src_idx)(sentences[bidx // beam_size]) for bidx, src_idx in enumerate(select_id_src)]
-        
-        # zip together with sentences; then output { the token if not unk / the replacement if is }. Note that this will trim the orig version down to repl size.
-        zipped = zip(flattened_outputs, replace_tokens)
-        replaced = np.array([ [tok if tok != unknown_token else rpl for rpl, tok in zip(repl, orig)] for orig, repl in zipped ])
-        # reshape back to outputs shape [batch, beam] of list
-        return replaced.reshape(outputs.shape)
+        used_attention = attn[layer_used][-1][:, head_used]  # [batchbeam, tgt_len, src_len]
+        flattened_outputs = outputs.reshape((-1, ))  # [batchbeam] of list of str
+        select_id_src = torch.argmax(used_attention, dim=-1).cpu().numpy()  # [batchbeam, tgt_len]
+        batch_size = len(sentences)
+        beam_size = select_id_src.shape[0] // batch_size
+        batchbeam = select_id_src.shape[0]
+    
+        # In thông tin để kiểm tra
+        # print(f"batch_size: {batch_size}, beam_size: {beam_size}, batchbeam: {batchbeam}")
+        # print(f"used_attention shape: {used_attention.shape}")
+        # print(f"flattened_outputs lengths: {[len(o) for o in flattened_outputs]}")
+    
+        # Tạo danh sách token thay thế
+        replace_tokens = []
+        for bidx, src_idx in enumerate(select_id_src):
+            src_sentence = sentences[bidx // beam_size]  # Lấy câu nguồn tương ứng
+            target_len = len(flattened_outputs[bidx])  # Độ dài của orig
+            # Lọc chỉ số hợp lệ
+            valid_indices = [i for i in src_idx if i < len(src_sentence)]
+            if not valid_indices:
+                repl = ["<unk>"] * target_len
+            else:
+                try:
+                    repl_tokens = operator.itemgetter(*valid_indices)(src_sentence)
+                    if isinstance(repl_tokens, str):
+                        repl_tokens = [repl_tokens]
+                    repl = list(repl_tokens)
+                except IndexError:
+                    repl = ["<unk>"] * target_len
+                # Cắt hoặc đệm repl để khớp với target_len
+                repl = repl[:target_len] + ["<unk>"] * (target_len - len(repl))
+            replace_tokens.append(repl)
+    
+        # In độ dài của replace_tokens để kiểm tra
+        #print(f"replace_tokens lengths: {[len(r) for r in replace_tokens]}")
+    
+        # Thay thế token <unk>
+        replaced = []
+        for orig, repl in zip(flattened_outputs, replace_tokens):
+            # Đảm bảo repl khớp với orig
+            if len(repl) < len(orig):
+                repl = repl + ["<unk>"] * (len(orig) - len(repl))
+            elif len(repl) > len(orig):
+                repl = repl[:len(orig)]
+            new_sentence = [tok if tok != unknown_token else rpl for rpl, tok in zip(repl, orig)]
+            replaced.append(new_sentence)
+    
+        return np.array(replaced, dtype=object).reshape(outputs.shape)
 
 #        for i in range(1, self.max_len):
 #            ix = attn[0, 0, i-1, :].argmax().data
@@ -334,3 +366,4 @@ class BeamSearch(DecodeStrategy):
             return super(BeamSearch, self)._token_to_index(tok)
         else:
             return self.SRC.vocab.stoi[tok]
+
