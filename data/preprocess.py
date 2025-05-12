@@ -148,7 +148,7 @@ def main():
         "output_dir": "processed_data",
         "src_langs": ["lo"],
         "tgt_lang": "vi",
-        "vocab_size": 32000,
+        "vocab_size": 16000,
         "datasets": ["train", "dev", "test"]
     }
     
