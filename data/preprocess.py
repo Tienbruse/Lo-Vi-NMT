@@ -144,7 +144,7 @@ class NMTPreprocessor:
 def main():
     # Cấu hình
     config = {
-        "data_dir": "data/VLSP2023",
+        "data_dir": "data/merged",
         "output_dir": "processed_data",
         "src_langs": ["lo"],
         "tgt_lang": "vi",
