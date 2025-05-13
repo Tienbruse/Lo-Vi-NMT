@@ -274,7 +274,36 @@ class Transformer(nn.Module):
             checkpoint_idx = 0
 
         # also, load the scores of the best model
-        best_model_score = saver.load_model_score(model_dir)
+        # SỬA LỖI TypeError KHI LOAD best_model_bleu_score
+        best_model_bleu_score = -float('inf') 
+        logging.info(f"Initializing best_model_bleu_score to -inf.")
+        if model_dir is not None:
+            loaded_value = saver.load_model_score(model_dir) # Giá trị trả về có thể là list hoặc float
+            if loaded_value is not None:
+                # Xử lý trường hợp loaded_value có thể là list
+                if isinstance(loaded_value, list):
+                    if loaded_value: # Nếu list không rỗng
+                        try:
+                            # Giả sử điểm số là phần tử đầu tiên nếu là list
+                            actual_score = float(loaded_value[0])
+                            best_model_bleu_score = actual_score
+                            logging.info(f"Loaded previous best BLEU score (from list[0]): {best_model_bleu_score:.4f}")
+                        except (ValueError, TypeError, IndexError) as e:
+                            logging.warning(f"Could not interpret loaded score from list: {loaded_value}. Error: {e}. Using -inf.")
+                            best_model_bleu_score = -float('inf') # Fallback
+                    else: # List rỗng
+                        logging.info(f"Loaded score was an empty list. Using -inf.")
+                        best_model_bleu_score = -float('inf')
+                elif isinstance(loaded_value, (float, int)): # Nếu đã là số
+                    best_model_bleu_score = float(loaded_value)
+                    logging.info(f"Loaded previous best BLEU score: {best_model_bleu_score:.4f}")
+                else: # Kiểu không mong đợi
+                    logging.warning(f"Loaded score is of unexpected type: {type(loaded_value)}. Value: {loaded_value}. Using -inf.")
+                    best_model_bleu_score = -float('inf')
+            else:
+                logging.info(f"No previous best BLEU score found in {model_dir}, using -inf.")
+        else:
+            logging.info("model_dir is None, starting best_model_bleu_score from -inf.")
         
         # set up optimizer  
         optim_algo = opt["optimizer"]
