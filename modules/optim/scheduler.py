@@ -25,6 +25,7 @@ class ScheduledOptim():
     def _get_lr_scale(self):
         d_model = self.d_model
         n_steps, n_warmup_steps = self.n_steps, self.n_warmup_steps
+        current_step_for_lr = max(1, n_steps) # Đảm bảo n_steps > 0 để tránh lỗi tính toán trong min()
         return (d_model ** -0.5) * min(n_steps ** (-0.5), n_steps * n_warmup_steps ** (-1.5))
 
     def state_dict(self):
@@ -45,11 +46,13 @@ class ScheduledOptim():
         self.n_steps = state_dict['n_steps']
         
         self._optimizer.load_state_dict(state_dict['_optimizer'])
+        self._update_learning_rate(force_update=True) #Cập nhật LR cho optimizer sau khi load state 
         
     def _update_learning_rate(self):
         ''' Learning rate scheduling per step '''
 
-        self.n_steps += 1
+        if not force_update: # Chỉ tăng n_steps nếu không phải là force_update từ load_state_dict
+            self.n_steps += 1
         lr = self.init_lr * self._get_lr_scale()
 
         for param_group in self._optimizer.param_groups:

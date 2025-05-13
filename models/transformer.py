@@ -125,7 +125,7 @@ class Transformer(nn.Module):
         else:
             return output
  
-    def train_step(self, optimizer, batch, criterion):
+    def train_step(self, optimizer, batch, criterion, scaler): # Thêm scaler
         """
         Perform one training step.
         """
@@ -143,16 +143,22 @@ class Transformer(nn.Module):
 
         # create mask and perform network forward
         src_mask, trg_mask = create_masks(src, trg_input, src_pad, trg_pad, opt.get('device', const.DEFAULT_DEVICE))
-        preds = self(src, trg_input, src_mask, trg_mask)
+       
         
-        # perform backprogation
-        optimizer.zero_grad()
-        loss = criterion(preds.view(-1, preds.size(-1)), ys)
-        loss.backward()
+        with torch.cuda.amp.autocast(enabled=True):
+            preds = self(src, trg_input, src_mask, trg_mask) # Forward pass
+            loss = criterion(preds.view(-1, preds.size(-1)), ys) # Tính loss
+        
+        # Scale loss và thực hiện backward pass với scaler
+        scaler.scale(loss).backward()
+
+        scaler.unscale_(optimizer._optimizer)
+
         optimizer.step_and_update_lr()
-        loss = loss.item()
         
-        return loss    
+        scaler.update()
+        
+        return loss.item()
 
     def validate(self, valid_iter, criterion, maximum_length=None):
         """Compute loss in validation dataset. As we can't perform trimming the input in the valid_iter yet, using a crutch in maximum_input_length variable
@@ -280,6 +286,11 @@ class Transformer(nn.Module):
         if optim_algo not in optimizers:
             raise ValueError("Unknown optimizer: {}".format(optim_algo))
         
+        # Khởi tạo optimizer PyTorch gốc trước
+        pytorch_optimizer_instance = optimizers.get(optim_algo_name)(model.parameters(), lr=lr_factor_or_init_lr, **optimizer_custom_params)
+        # Lưu ý: lr ban đầu cho optimizer gốc có thể không quá quan trọng vì ScheduledOptim sẽ ghi đè nó ngay.
+        
+        
         optimizer = ScheduledOptim(
                 optimizer=optimizers.get(optim_algo)(model.parameters(), **optimizer_params),
                 init_lr=lr, 
@@ -289,6 +300,9 @@ class Transformer(nn.Module):
         
         # define loss function 
         criterion = LabelSmoothingLoss(len(self.TRG.vocab), padding_idx=trg_pad, smoothing=opt['label_smoothing'])
+
+        use_amp_flag = opt.get('use_amp', True) # Lấy từ config, mặc định là True
+        scaler = torch.cuda.amp.GradScaler(enabled=use_amp_flag)
 
 #        valid_src_data, valid_trg_data = self.loader._eval_data
 #        raise Exception("Initial bleu: %.3f" % bleu_batch_iter(self, self.valid_iter, debug=True))
@@ -302,6 +316,11 @@ class Transformer(nn.Module):
         logging.info("Decoder: %s"%(params_decode))
         logging.info("* Number of parameters: %s"%(params_encode+params_decode))
         logging.info("Starting training on %s"%(opt.get('device', const.DEFAULT_DEVICE)))
+
+        patience_epochs_config = opt.get('early_stopping_patience', 10) # Lấy từ config
+        patience_counter_early_stop = 0
+        # best_bleu_for_early_stopping sẽ dùng best_model_bleu_score đã load ở trên
+        
 
         for epoch in range(checkpoint_idx, opt['epochs']):
             total_loss = 0.0
@@ -323,6 +342,8 @@ class Transformer(nn.Module):
             # bleu calculation and evaluate, save checkpoint for every {save_checkpoint_epochs} epochs
             s = time.time()
             valid_loss = self.validate(self.valid_iter, criterion, maximum_length=(self.encoder._max_seq_length, self.decoder._max_seq_length))
+            current_epoch_bleu_score = 0.0 # Giá trị mặc định 
+
             if (epoch+1) % opt['save_checkpoint_epochs'] == 0 and model_dir is not None:
         
                 # evaluate loss and bleu score on validation dataset for each epoch
@@ -338,9 +359,33 @@ class Transformer(nn.Module):
                 best_model_score = saver.save_model_best_to_path(model, model_dir, best_model_score, bleuscore, maximum_saved_model=opt.get('maximum_saved_model_eval', const.DEFAULT_NUM_KEEP_MODEL_TRAIN))
                 # print('epoch: {:03d} - iter: {:05d} - valid loss: {:.4f} - bleu score: {:.4f} - full evaluation time: {:.4f}'.format(epoch, i, valid_loss, bleuscore, time.time() - s))
                 logging.info('epoch: {:03d} - iter: {:05d} - valid loss: {:.4f} - bleu score: {:.4f} - full evaluation time: {:.4f}'.format(epoch, i, valid_loss, bleuscore, time.time() - s))
-            else:
-                # print('epoch: {:03d} - iter: {:05d} - valid loss: {:.4f} - validation time: {:.4f}'.format(epoch, i, valid_loss, time.time() - s))
-                logging.info('epoch: {:03d} - iter: {:05d} - valid loss: {:.4f} - validation time: {:.4f}'.format(epoch, i, valid_loss, time.time() - s))
+            # Logic lưu model tốt nhất dựa trên BLEU
+                if current_epoch_bleu_score > best_model_bleu_score:
+                    best_model_bleu_score = current_epoch_bleu_score
+                    saver.save_model_best_to_path(
+                        model, model_dir, best_model_bleu_score, current_epoch_bleu_score, # Truyền BLEU hiện tại
+                        maximum_saved_model=opt.get('maximum_saved_model_eval', const.DEFAULT_NUM_KEEP_MODEL_EVAL) # Sửa const nếu cần
+                    )
+                    logging.info(f"  *** NEW BEST BLEU: {best_model_bleu_score:.4f}. Saved best model for epoch {epoch+1}. ***")
+                    patience_counter_early_stop = 0 # Reset patience vì có cải thiện
+                else:
+                    patience_counter_early_stop += 1
+                    logging.info(f"  EarlyStopping: BLEU không cải thiện ({current_epoch_bleu_score:.4f} vs best {best_model_bleu_score:.4f}). Patience: {patience_counter_early_stop}/{patience_epochs_config}")
+            else: # Nếu không phải epoch để tính BLEU và lưu model
+                logging.info(f'Epoch: {epoch+1:03d} - Valid Loss: {valid_loss_epoch:.4f} - Validation Time (loss only): {time.time() - eval_start_time:.2f}s')
+                # Nếu không tính BLEU ở epoch này, chúng ta không thể cập nhật patience cho early stopping dựa trên BLEU
+                # Bạn có thể chọn theo dõi valid_loss cho early stopping nếu BLEU không được tính mỗi epoch
+                # Hoặc chỉ kích hoạt early stopping vào những epoch có tính BLEU
+
+            # --- Logic Early Stopping (chỉ kích hoạt nếu BLEU được tính ở epoch này) ---
+            if (epoch + 1) % opt['save_checkpoint_epochs'] == 0 and model_dir is not None: # Đảm bảo BLEU đã được tính
+                if patience_counter_early_stop >= patience_epochs_config:
+                    logging.info(f"EARLY STOPPING: Kích hoạt tại epoch {epoch+1} do BLEU không cải thiện sau {patience_epochs_config} lần đánh giá liên tiếp.")
+                    logging.info(f"BLEU tốt nhất đạt được: {best_model_bleu_score:.4f}")
+                    break # Thoát khỏi vòng lặp huấn luyện epoch
+
+        logging.info("Hoàn tất quá trình huấn luyện.")
+        logging.info(f"Model tốt nhất (BLEU: {best_model_bleu_score:.4f}) đã được lưu tại {model_dir} (thường có tên chứa 'best').")
 
     def run_infer(self, features_file, predictions_file, src_lang=None, trg_lang=None, config=None, batch_size=None):
         opt = self.config
