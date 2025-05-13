@@ -301,20 +301,19 @@ class Transformer(nn.Module):
         # define loss function 
         criterion = LabelSmoothingLoss(len(self.TRG.vocab), padding_idx=trg_pad, smoothing=opt['label_smoothing'])
 
-        use_amp_flag = opt.get('use_amp', True) # Lấy từ config, mặc định là True
+        use_amp_flag = opt.get('use_amp', True)
+        # Sửa lỗi TypeError: GradScaler không có device_type
         if use_amp_flag and torch.cuda.is_available():
             try:
                 # Ưu tiên API mới nếu PyTorch version hỗ trợ
-                scaler = torch.amp.GradScaler(device_type='cuda', enabled=True)
+                scaler = torch.amp.GradScaler(enabled=True) # Bỏ device_type
             except AttributeError: 
                 # Fallback cho phiên bản PyTorch cũ hơn
                 scaler = torch.cuda.amp.GradScaler(enabled=True)
         else:
             # Tạo một dummy scaler nếu AMP không được dùng hoặc không có CUDA
-            # Điều này giúp code chạy mà không cần if/else scaler ở nhiều nơi
-            # nhưng GradScaler(enabled=False) sẽ không làm gì cả.
             try:
-                scaler = torch.amp.GradScaler(device_type='cuda', enabled=False)
+                scaler = torch.amp.GradScaler(enabled=False) # Bỏ device_type
             except AttributeError:
                 scaler = torch.cuda.amp.GradScaler(enabled=False)
 
