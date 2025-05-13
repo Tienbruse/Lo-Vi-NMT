@@ -3,6 +3,7 @@ import torch.nn as nn
 import torchtext.data as data
 import copy, time, io
 import numpy as np
+import logging
 
 from modules.prototypes import Encoder, Decoder, Config as DefaultConfig
 from modules.loader import DefaultLoader, MultiLoader
@@ -255,20 +256,20 @@ class Transformer(nn.Module):
     def run_train(self, model_dir=None, config=None):
         opt = self.config
         from utils.logging import init_logger
-        logging = init_logger(model_dir, opt.get('log_file_models'))
+        local_logging = init_logger(model_dir, opt.get('log_file_models'))
 
         trg_pad = self.TRG.vocab.stoi['<pad>']     
         # load model into specific device (GPU/CPU) memory   
-        logging.info("%s * src vocab size = %s"%(self.loader._language_tuple[0] ,len(self.SRC.vocab)))
-        logging.info("%s * tgt vocab size = %s"%(self.loader._language_tuple[1] ,len(self.TRG.vocab)))
-        logging.info("Building model...")
+        local_logging.info("%s * src vocab size = %s"%(self.loader._language_tuple[0] ,len(self.SRC.vocab)))
+        local_logging.info("%s * tgt vocab size = %s"%(self.loader._language_tuple[1] ,len(self.TRG.vocab)))
+        local_logging.info("Building model...")
         model = self.to(opt.get('device', const.DEFAULT_DEVICE))
 
         checkpoint_idx = self._checkpoint_idx
         if(checkpoint_idx < 0):
             # initialize weights    
             print("Zero checkpoint detected, reinitialize the model")
-            for p in model.parameters():
+            for p in self.parameters():
                 if p.dim() > 1:
                     nn.init.xavier_uniform_(p)
             checkpoint_idx = 0
@@ -276,56 +277,52 @@ class Transformer(nn.Module):
         # also, load the scores of the best model
         # SỬA LỖI TypeError KHI LOAD best_model_bleu_score
         best_model_bleu_score = -float('inf') 
-        logging.info(f"Initializing best_model_bleu_score to -inf.")
+        local_logging.info(f"Initializing best_model_bleu_score to -inf.")
         if model_dir is not None:
-            loaded_value = saver.load_model_score(model_dir) # Giá trị trả về có thể là list hoặc float
+            loaded_value = saver.load_model_score(model_dir)
             if loaded_value is not None:
-                # Xử lý trường hợp loaded_value có thể là list
                 if isinstance(loaded_value, list):
-                    if loaded_value: # Nếu list không rỗng
+                    if loaded_value: 
                         try:
-                            # Giả sử điểm số là phần tử đầu tiên nếu là list
                             actual_score = float(loaded_value[0])
                             best_model_bleu_score = actual_score
-                            logging.info(f"Loaded previous best BLEU score (from list[0]): {best_model_bleu_score:.4f}")
+                            local_logging.info(f"Loaded previous best BLEU score (from list[0]): {best_model_bleu_score:.4f}")
                         except (ValueError, TypeError, IndexError) as e:
-                            logging.warning(f"Could not interpret loaded score from list: {loaded_value}. Error: {e}. Using -inf.")
-                            best_model_bleu_score = -float('inf') # Fallback
-                    else: # List rỗng
-                        logging.info(f"Loaded score was an empty list. Using -inf.")
-                        best_model_bleu_score = -float('inf')
-                elif isinstance(loaded_value, (float, int)): # Nếu đã là số
+                            local_logging.warning(f"Could not interpret loaded score from list: {loaded_value}. Error: {e}. Using -inf.")
+                    else: 
+                        local_logging.info(f"Loaded score was an empty list. Using -inf.")
+                elif isinstance(loaded_value, (float, int)): 
                     best_model_bleu_score = float(loaded_value)
-                    logging.info(f"Loaded previous best BLEU score: {best_model_bleu_score:.4f}")
-                else: # Kiểu không mong đợi
-                    logging.warning(f"Loaded score is of unexpected type: {type(loaded_value)}. Value: {loaded_value}. Using -inf.")
-                    best_model_bleu_score = -float('inf')
+                    local_logging.info(f"Loaded previous best BLEU score: {best_model_bleu_score:.4f}")
+                else: 
+                    local_logging.warning(f"Loaded score is of unexpected type: {type(loaded_value)}. Value: {loaded_value}. Using -inf.")
             else:
-                logging.info(f"No previous best BLEU score found in {model_dir}, using -inf.")
+                local_logging.info(f"No previous best BLEU score found in {model_dir}, using -inf.")
         else:
-            logging.info("model_dir is None, starting best_model_bleu_score from -inf.")
+            local_logging.info("model_dir is None, starting best_model_bleu_score from -inf.")
         
-        # set up optimizer  
-        optim_algo = opt["optimizer"]
-        lr = opt["lr"]
-        d_model = opt["d_model"]
-        n_warmup_steps = opt["n_warmup_steps"]
-        optimizer_params = opt.get("optimizer_params", dict({}))
+        
+        optim_algo_name_from_config = opt["optimizer"]
+        lr_init_factor_from_config = opt["lr"] # Đây là init_lr cho ScheduledOptim
+        d_model_from_config = opt["d_model"]
+        n_warmup_steps_from_config = opt["n_warmup_steps"]
+        optimizer_params_from_config = opt.get("optimizer_params", {})
 
-        if optim_algo not in optimizers:
-            raise ValueError("Unknown optimizer: {}".format(optim_algo))
+        if optim_algo_name_from_config not in optimizers: # optimizers là dict từ modules.optim
+            raise ValueError(f"Unknown optimizer: {optim_algo_name_from_config}")
         
-        # Khởi tạo optimizer PyTorch gốc trước
-        pytorch_optimizer_instance = optimizers.get(optim_algo)(model.parameters(), lr=lr, **optimizer_params)
-        # Lưu ý: lr ban đầu cho optimizer gốc có thể không quá quan trọng vì ScheduledOptim sẽ ghi đè nó ngay.
-        
+        pytorch_optimizer_instance = optimizers.get(optim_algo_name_from_config)(
+            self.parameters(), # Sửa model.parameters() thành self.parameters()
+            lr=lr_init_factor_from_config, # Sẽ bị ScheduledOptim ghi đè ngay
+            **optimizer_params_from_config
+        )
         
         optimizer = ScheduledOptim(
-                optimizer=optimizers.get(optim_algo)(model.parameters(), **optimizer_params),
-                init_lr=lr, 
-                d_model=d_model, 
-                n_warmup_steps=n_warmup_steps
-            )
+            optimizer=pytorch_optimizer_instance,
+            init_lr=lr_init_factor_from_config, 
+            d_model=d_model_from_config,
+            n_warmup_steps=n_warmup_steps_from_config
+        )
         
         # define loss function 
         criterion = LabelSmoothingLoss(len(self.TRG.vocab), padding_idx=trg_pad, smoothing=opt['label_smoothing'])
@@ -348,16 +345,16 @@ class Transformer(nn.Module):
 
 #        valid_src_data, valid_trg_data = self.loader._eval_data
 #        raise Exception("Initial bleu: %.3f" % bleu_batch_iter(self, self.valid_iter, debug=True))
-        logging.info(self)
+        local_logging.info(self)
         model_encoder_parameters = filter(lambda p: p.requires_grad, self.encoder.parameters())
         model_decoder_parameters = filter(lambda p: p.requires_grad, self.decoder.parameters())
         params_encode = sum([np.prod(p.size()) for p in model_encoder_parameters])
         params_decode = sum([np.prod(p.size()) for p in model_decoder_parameters])
 
-        logging.info("Encoder: %s"%(params_encode))
-        logging.info("Decoder: %s"%(params_decode))
-        logging.info("* Number of parameters: %s"%(params_encode+params_decode))
-        logging.info("Starting training on %s"%(opt.get('device', const.DEFAULT_DEVICE)))
+        local_logging.info("Encoder: %s"%(params_encode))
+        local_logging.info("Decoder: %s"%(params_decode))
+        local_logging.info("* Number of parameters: %s"%(params_encode+params_decode))
+        local_logging.info("Starting training on %s"%(opt.get('device', const.DEFAULT_DEVICE)))
 
         patience_epochs_config = opt.get('early_stopping_patience', 10) # Lấy từ config
         patience_counter_early_stop = 0
@@ -377,57 +374,51 @@ class Transformer(nn.Module):
                     avg_loss = total_loss / opt['printevery']
                     et = time.time() - s
                     # print('epoch: {:03d} - iter: {:05d} - train loss: {:.4f} - time elapsed/per batch: {:.4f} {:.4f}'.format(epoch, i+1, avg_loss, et, et / opt['printevery']))
-                    logging.info('epoch: {:03d} - iter: {:05d} - train loss: {:.4f} - time elapsed/per batch: {:.4f} {:.4f}'.format(epoch, i+1, avg_loss, et, et / opt['printevery']))
+                    local_logging.info('epoch: {:03d} - iter: {:05d} - train loss: {:.4f} - time elapsed/per batch: {:.4f} {:.4f}'.format(epoch, i+1, avg_loss, et, et / opt['printevery']))
                     total_loss = 0
                     s = time.time()
             
             # bleu calculation and evaluate, save checkpoint for every {save_checkpoint_epochs} epochs
-            s = time.time()
-            valid_loss = self.validate(self.valid_iter, criterion, maximum_length=(self.encoder._max_seq_length, self.decoder._max_seq_length))
-            current_epoch_bleu_score = 0.0 # Giá trị mặc định 
+            eval_start_time = time.time()
+            valid_loss_epoch = self.validate(self.valid_iter, criterion, maximum_length=(self.encoder._max_seq_length, self.decoder._max_seq_length))
+            current_epoch_bleu_score = 0.0 # Khởi tạo ở đây để đảm bảo nó luôn được định nghĩa
+            default_keep_train = getattr(const, 'DEFAULT_NUM_KEEP_MODEL_TRAIN', 3)
+            default_keep_eval = getattr(const, 'DEFAULT_NUM_KEEP_MODEL_EVAL', 5)
 
-            if (epoch+1) % opt['save_checkpoint_epochs'] == 0 and model_dir is not None:
-        
-                # evaluate loss and bleu score on validation dataset for each epoch
-#                bleuscore = bleu(valid_src_data, valid_trg_data, model, opt.get('device', const.DEFAULT_DEVICE), opt['k'], opt['max_strlen'])
-#                bleuscore = bleu_single(self, self.loader._eval_data)
-#                bleuscore = bleu_batch(self, self.loader._eval_data, batch_size=opt.get('eval_batch_size', const.DEFAULT_EVAL_BATCH_SIZE))
+            if (epoch + 1) % opt['save_checkpoint_epochs'] == 0 and model_dir is not None:
                 valid_src_lang, valid_trg_lang = self.loader.language_tuple
-                bleuscore = bleu_batch_iter(self, self.valid_iter, src_lang=valid_src_lang, trg_lang=valid_trg_lang)
+                current_epoch_bleu_score = bleu_batch_iter(self, self.valid_iter, src_lang=valid_src_lang, trg_lang=valid_trg_lang)
+                
+                saver.save_and_clear_model(
+                    self, model_dir, checkpoint_idx=epoch+1, # Sửa model thành self
+                    maximum_saved_model=opt.get('maximum_saved_model_train', default_keep_train)
+                )
+                local_logging.info(f'Epoch: {epoch+1:03d} - Valid Loss: {valid_loss_epoch:.4f} - BLEU Score: {current_epoch_bleu_score:.4f} - Eval Time: {time.time() - eval_start_time:.2f}s')
 
-#                save_model_to_path(model, model_dir, checkpoint_idx=epoch+1)
-                saver.save_and_clear_model(model, model_dir, checkpoint_idx=epoch+1, maximum_saved_model=opt.get('maximum_saved_model_train', const.DEFAULT_NUM_KEEP_MODEL_TRAIN))
-                # keep the best models per every bleu calculation
-                best_model_score = saver.save_model_best_to_path(model, model_dir, best_model_score, bleuscore, maximum_saved_model=opt.get('maximum_saved_model_eval', const.DEFAULT_NUM_KEEP_MODEL_TRAIN))
-                # print('epoch: {:03d} - iter: {:05d} - valid loss: {:.4f} - bleu score: {:.4f} - full evaluation time: {:.4f}'.format(epoch, i, valid_loss, bleuscore, time.time() - s))
-                logging.info('epoch: {:03d} - iter: {:05d} - valid loss: {:.4f} - bleu score: {:.4f} - full evaluation time: {:.4f}'.format(epoch, i, valid_loss, bleuscore, time.time() - s))
-            # Logic lưu model tốt nhất dựa trên BLEU
                 if current_epoch_bleu_score > best_model_bleu_score:
-                    best_model_bleu_score = current_epoch_bleu_score
+                    best_model_bleu_score = current_epoch_bleu_score 
                     saver.save_model_best_to_path(
-                        model, model_dir, best_model_bleu_score, current_epoch_bleu_score, # Truyền BLEU hiện tại
-                        maximum_saved_model=opt.get('maximum_saved_model_eval', const.DEFAULT_NUM_KEEP_MODEL_EVAL) # Sửa const nếu cần
+                        self, model_dir, # Sửa model thành self
+                        best_model_bleu_score, # Đây là điểm BLEU tốt nhất mới
+                        current_epoch_bleu_score, # Điểm BLEU của epoch hiện tại (dùng để so sánh trong saver nếu cần)
+                        maximum_saved_model=opt.get('maximum_saved_model_eval', default_keep_eval)
                     )
-                    logging.info(f"  *** NEW BEST BLEU: {best_model_bleu_score:.4f}. Saved best model for epoch {epoch+1}. ***")
-                    patience_counter_early_stop = 0 # Reset patience vì có cải thiện
+                    local_logging.info(f"  *** NEW BEST BLEU: {best_model_bleu_score:.4f}. Saved best model for epoch {epoch+1}. ***")
+                    patience_counter_early_stop = 0 
                 else:
                     patience_counter_early_stop += 1
-                    logging.info(f"  EarlyStopping: BLEU không cải thiện ({current_epoch_bleu_score:.4f} vs best {best_model_bleu_score:.4f}). Patience: {patience_counter_early_stop}/{patience_epochs_config}")
-            else: # Nếu không phải epoch để tính BLEU và lưu model
-                logging.info(f'Epoch: {epoch+1:03d} - Valid Loss: {valid_loss_epoch:.4f} - Validation Time (loss only): {time.time() - eval_start_time:.2f}s')
-                # Nếu không tính BLEU ở epoch này, chúng ta không thể cập nhật patience cho early stopping dựa trên BLEU
-                # Bạn có thể chọn theo dõi valid_loss cho early stopping nếu BLEU không được tính mỗi epoch
-                # Hoặc chỉ kích hoạt early stopping vào những epoch có tính BLEU
-
-            # --- Logic Early Stopping (chỉ kích hoạt nếu BLEU được tính ở epoch này) ---
-            if (epoch + 1) % opt['save_checkpoint_epochs'] == 0 and model_dir is not None: # Đảm bảo BLEU đã được tính
+                    local_logging.info(f"  EarlyStopping: BLEU không cải thiện ({current_epoch_bleu_score:.4f} vs best {best_model_bleu_score:.4f}). Patience: {patience_counter_early_stop}/{patience_epochs_config}")
+                
                 if patience_counter_early_stop >= patience_epochs_config:
-                    logging.info(f"EARLY STOPPING: Kích hoạt tại epoch {epoch+1} do BLEU không cải thiện sau {patience_epochs_config} lần đánh giá liên tiếp.")
-                    logging.info(f"BLEU tốt nhất đạt được: {best_model_bleu_score:.4f}")
-                    break # Thoát khỏi vòng lặp huấn luyện epoch
+                    local_logging.info(f"EARLY STOPPING: Kích hoạt tại epoch {epoch+1} do BLEU không cải thiện sau {patience_epochs_config} lần đánh giá liên tiếp.")
+                    local_logging.info(f"BLEU tốt nhất đạt được: {best_model_bleu_score:.4f}")
+                    break 
+            else: 
+                local_logging.info(f'Epoch: {epoch+1:03d} - Valid Loss: {valid_loss_epoch:.4f} - Validation Time (loss only): {time.time() - eval_start_time:.2f}s')
 
-        logging.info("Hoàn tất quá trình huấn luyện.")
-        logging.info(f"Model tốt nhất (BLEU: {best_model_bleu_score:.4f}) đã được lưu tại {model_dir} (thường có tên chứa 'best').")
+
+        local_logging.info("Hoàn tất quá trình huấn luyện.")
+        local_logging.info(f"Model tốt nhất (BLEU: {best_model_bleu_score:.4f}) đã được lưu tại {model_dir} (thường có tên chứa 'best').")
 
     def run_infer(self, features_file, predictions_file, src_lang=None, trg_lang=None, config=None, batch_size=None):
         opt = self.config
@@ -443,9 +434,9 @@ class Transformer(nn.Module):
         # Append each translated sentence line by line
 #        results = "\n".join([model.loader.detokenize(model.translate_sentence(sentence)) for sentence in inputs])
         # Translate by batched versions
-        start = time.time()
+        eval_start_time = time.time()
         results = "\n".join( self.translate_batch_sentence(inputs, src_lang=src_lang, trg_lang=trg_lang, output_tokens=False, batch_size=batch_size))
-        print("Inference done, cost {:.2f} secs.".format(time.time() - start))
+        print("Inference done, cost {:.2f} secs.".format(time.time() - eval_start_time))
 
         # Write results to system file
         print("Writing results to {} ...".format(predictions_file))
