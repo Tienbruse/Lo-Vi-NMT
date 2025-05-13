@@ -274,7 +274,19 @@ class Transformer(nn.Module):
             checkpoint_idx = 0
 
         # also, load the scores of the best model
-        best_model_score = saver.load_model_score(model_dir)
+        # SỬA ĐỔI KHỞI TẠO best_model_bleu_score
+        # Khởi tạo với giá trị mặc định chắc chắn trước khi gọi saver
+        best_model_bleu_score = -float('inf') 
+        logging.info(f"Initializing best_model_bleu_score to -inf.")
+        if model_dir is not None: # Chỉ tải nếu model_dir được cung cấp
+            loaded_score = saver.load_model_score(model_dir)
+            if loaded_score is not None:
+                best_model_bleu_score = loaded_score
+                logging.info(f"Loaded previous best BLEU score: {best_model_bleu_score:.4f}")
+            else:
+                logging.info(f"No previous best BLEU score found in {model_dir}, using -inf.")
+        else:
+            logging.info("model_dir is None, starting best_model_bleu_score from -inf.")
         
         # set up optimizer  
         optim_algo = opt["optimizer"]
