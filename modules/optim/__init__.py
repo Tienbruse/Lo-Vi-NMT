@@ -6,8 +6,10 @@ import torch # Thêm import torch nếu các file optimizer con chưa import
 # Hoặc chúng là alias của các optimizer từ torch.optim
 from modules.optim.adam import AdamOptim
 from modules.optim.adabelief import AdaBeliefOptim
-# scheduler.py được import ở nơi khác (ví dụ: transformer.py) nên không cần thiết ở đây
-# from modules.optim.scheduler import ScheduledOptim
+
+# Import ScheduledOptim từ file scheduler.py trong cùng thư mục modules/optim
+# Bỏ comment dòng này để transformer.py có thể import được ScheduledOptim
+from modules.optim.scheduler import ScheduledOptim
 
 # Import AdamW trực tiếp từ torch.optim
 from torch.optim import AdamW
@@ -19,5 +21,5 @@ optimizers = {
     "AdamW": AdamW              # Thêm AdamW vào dictionary
 }
 
-# Bạn có thể xóa dòng import ScheduledOptim nếu nó không được dùng trực tiếp trong file __init__ này.
-# Lớp ScheduledOptim được sử dụng trong transformer.py để bọc quanh các optimizer trên.
+# Lớp ScheduledOptim bây giờ đã được import và có thể được sử dụng bởi các module khác
+# khi chúng import từ 'modules.optim'.
