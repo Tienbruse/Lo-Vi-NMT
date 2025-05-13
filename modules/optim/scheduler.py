@@ -48,7 +48,7 @@ class ScheduledOptim():
         self._optimizer.load_state_dict(state_dict['_optimizer'])
         self._update_learning_rate(force_update=True) #Cập nhật LR cho optimizer sau khi load state 
         
-    def _update_learning_rate(self):
+    def _update_learning_rate(self, force_update=False):
         ''' Learning rate scheduling per step '''
 
         if not force_update: # Chỉ tăng n_steps nếu không phải là force_update từ load_state_dict
