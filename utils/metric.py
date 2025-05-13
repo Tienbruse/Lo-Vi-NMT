@@ -6,7 +6,7 @@ def bleu(valid_src_data, valid_trg_data, model, device, k, max_strlen):
         pred_trg = model.translate_sentence(sentence, device, k, max_strlen)
         pred_sents.append(pred_trg)
     
-    pred_sents = [self.TRG.preprocess(sent) for sent in pred_sents]
+    pred_sents = [model.TRG.preprocess(sent) for sent in pred_sents]
     trg_sents = [[sent.split()] for sent in valid_trg_data]
     
     return bleu_score(pred_sents, trg_sents)

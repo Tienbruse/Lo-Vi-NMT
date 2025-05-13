@@ -4,6 +4,7 @@ import torchtext.data as data
 import copy, time, io
 import numpy as np
 import logging
+import os
 
 from modules.prototypes import Encoder, Decoder, Config as DefaultConfig
 from modules.loader import DefaultLoader, MultiLoader
@@ -255,170 +256,196 @@ class Transformer(nn.Module):
 
     def run_train(self, model_dir=None, config=None):
         opt = self.config
-        from utils.logging import init_logger
-        local_logging = init_logger(model_dir, opt.get('log_file_models'))
+
+        try:
+            from utils.logging import init_logger
+            logging = init_logger(model_dir, opt.get('log_file_models')) 
+        except ImportError:
+            print("Warning: utils.logging.init_logger not found. Using basic print statements.")
+            class PrintLogger:
+                def info(self, msg): print(f"INFO: {msg}")
+                def warning(self, msg): print(f"WARNING: {msg}")
+            self.local_logging = PrintLogger()
 
         trg_pad = self.TRG.vocab.stoi['<pad>']     
         # load model into specific device (GPU/CPU) memory   
-        local_logging.info("%s * src vocab size = %s"%(self.loader._language_tuple[0] ,len(self.SRC.vocab)))
-        local_logging.info("%s * tgt vocab size = %s"%(self.loader._language_tuple[1] ,len(self.TRG.vocab)))
-        local_logging.info("Building model...")
+        logging.info("%s * src vocab size = %s"%(self.loader._language_tuple[0] ,len(self.SRC.vocab)))
+        logging.info("%s * tgt vocab size = %s"%(self.loader._language_tuple[1] ,len(self.TRG.vocab)))
+        logging.info("Building model...")
+        logging.info(self)
+
         model = self.to(opt.get('device', const.DEFAULT_DEVICE))
 
+        current_epoch_start_index = self._checkpoint_idx if self._checkpoint_idx > 0 else 0
+        
         checkpoint_idx = self._checkpoint_idx
         if(checkpoint_idx < 0):
             # initialize weights    
             print("Zero checkpoint detected, reinitialize the model")
-            for p in self.parameters():
+            for p in model.parameters():
                 if p.dim() > 1:
-                    nn.init.xavier_uniform_(p)
+                    nn.init.xavier_uniform_(p)  
             checkpoint_idx = 0
 
-        # also, load the scores of the best model
-        # SỬA LỖI TypeError KHI LOAD best_model_bleu_score
-        best_model_bleu_score = -float('inf') 
-        local_logging.info(f"Initializing best_model_bleu_score to -inf.")
-        if model_dir is not None:
-            loaded_value = saver.load_model_score(model_dir)
-            if loaded_value is not None:
-                if isinstance(loaded_value, list):
-                    if loaded_value: 
-                        try:
-                            actual_score = float(loaded_value[0])
-                            best_model_bleu_score = actual_score
-                            local_logging.info(f"Loaded previous best BLEU score (from list[0]): {best_model_bleu_score:.4f}")
-                        except (ValueError, TypeError, IndexError) as e:
-                            local_logging.warning(f"Could not interpret loaded score from list: {loaded_value}. Error: {e}. Using -inf.")
-                    else: 
-                        local_logging.info(f"Loaded score was an empty list. Using -inf.")
-                elif isinstance(loaded_value, (float, int)): 
-                    best_model_bleu_score = float(loaded_value)
-                    local_logging.info(f"Loaded previous best BLEU score: {best_model_bleu_score:.4f}")
-                else: 
-                    local_logging.warning(f"Loaded score is of unexpected type: {type(loaded_value)}. Value: {loaded_value}. Using -inf.")
-            else:
-                local_logging.info(f"No previous best BLEU score found in {model_dir}, using -inf.")
-        else:
-            local_logging.info("model_dir is None, starting best_model_bleu_score from -inf.")
-        
-        
-        optim_algo_name_from_config = opt["optimizer"]
-        lr_init_factor_from_config = opt["lr"] # Đây là init_lr cho ScheduledOptim
-        d_model_from_config = opt["d_model"]
-        n_warmup_steps_from_config = opt["n_warmup_steps"]
-        optimizer_params_from_config = opt.get("optimizer_params", {})
 
-        if optim_algo_name_from_config not in optimizers: # optimizers là dict từ modules.optim
-            raise ValueError(f"Unknown optimizer: {optim_algo_name_from_config}")
+        # Khởi tạo và tải danh sách các điểm BLEU lịch sử
+        best_model_score = [] 
+        logging.info(f"Initializing list_of_historical_best_scores as empty list.")
+        if model_dir is not None:
+            # saver.load_model_score trả về list các scores, hoặc list rỗng nếu file không tồn tại
+            loaded_scores_list = saver.load_model_score(model_dir) 
+            if loaded_scores_list: # Nếu list không rỗng
+                best_model_score = loaded_scores_list
+                logging.info(f"Loaded historical best BLEU scores: {best_model_score}")
+            else: 
+                logging.info(f"No previous best BLEU scores found in {model_dir} or file was empty, list_of_historical_best_scores remains empty.")
+        else:
+            logging.info("model_dir is None, list_of_historical_best_scores remains empty.")
+
+        # best_bleu_for_comparison là điểm BLEU cao nhất hiện tại (dạng float) để so sánh
+        best_bleu_for_comparison = max(best_model_score) if best_model_score else -float('inf')
+        logging.info(f"Current best BLEU for comparison: {best_bleu_for_comparison:.4f}")
         
-        pytorch_optimizer_instance = optimizers.get(optim_algo_name_from_config)(
-            self.parameters(), # Sửa model.parameters() thành self.parameters()
-            lr=lr_init_factor_from_config, # Sẽ bị ScheduledOptim ghi đè ngay
-            **optimizer_params_from_config
-        )
+        optim_algo = opt["optimizer"]
+        lr = opt["lr"]
+        d_model = opt["d_model"]
+        n_warmup_steps = opt["n_warmup_steps"]
+        optimizer_params = opt.get("optimizer_params", dict({}))
+
+        if optim_algo not in optimizers:
+            raise ValueError("Unknown optimizer: {}".format(optim_algo))
         
         optimizer = ScheduledOptim(
-            optimizer=pytorch_optimizer_instance,
-            init_lr=lr_init_factor_from_config, 
-            d_model=d_model_from_config,
-            n_warmup_steps=n_warmup_steps_from_config
-        )
+                optimizer=optimizers.get(optim_algo)(model.parameters(), **optimizer_params),
+                init_lr=lr, 
+                d_model=d_model, 
+                n_warmup_steps=n_warmup_steps
+            )
         
-        # define loss function 
-        criterion = LabelSmoothingLoss(len(self.TRG.vocab), padding_idx=trg_pad, smoothing=opt['label_smoothing'])
+        # # Logic để resume optimizer state
+        # if self._checkpoint_idx > 0 and model_dir is not None:
+        #     try:
+        #         # Giả sử saver.get_checkpoint_path trả về đường dẫn đúng
+        #         # Và checkpoint file chứa 'optimizer_scheduled_state_dict'
+        #         checkpoint_file_to_load_optim = saver.get_checkpoint_path(model_dir, self._checkpoint_idx) 
+        #         if checkpoint_file_to_load_optim and os.path.exists(checkpoint_file_to_load_optim):
+        #             checkpoint_data = torch.load(checkpoint_file_to_load_optim, map_location=self.device)
+        #             if 'optimizer_scheduled_state_dict' in checkpoint_data:
+        #                 optimizer.load_state_dict(checkpoint_data['optimizer_scheduled_state_dict'])
+        #                 self.local_logging.info(f"Optimizer state loaded from checkpoint epoch {self._checkpoint_idx}. Scheduler n_steps: {optimizer.n_steps}")
+        #             else:
+        #                 self.local_logging.warning(f"Optimizer state (optimizer_scheduled_state_dict) not found in checkpoint epoch {self._checkpoint_idx}.")
+        #         else:
+        #             self.local_logging.warning(f"Checkpoint file for epoch {self._checkpoint_idx} not found for optimizer resume at {checkpoint_file_to_load_optim}.")
+        #     except Exception as e:
+        #         self.local_logging.warning(f"Error loading optimizer state from checkpoint: {e}")
 
+
+        criterion = LabelSmoothingLoss(len(self.TRG.vocab), padding_idx=trg_pad, smoothing=opt['label_smoothing'])
+        
         use_amp_flag = opt.get('use_amp', True)
-        # Sửa lỗi TypeError: GradScaler không có device_type
+        scaler = None 
         if use_amp_flag and torch.cuda.is_available():
             try:
-                # Ưu tiên API mới nếu PyTorch version hỗ trợ
-                scaler = torch.amp.GradScaler(enabled=True) # Bỏ device_type
+                scaler = torch.amp.GradScaler(enabled=True) 
             except AttributeError: 
-                # Fallback cho phiên bản PyTorch cũ hơn
                 scaler = torch.cuda.amp.GradScaler(enabled=True)
-        else:
-            # Tạo một dummy scaler nếu AMP không được dùng hoặc không có CUDA
-            try:
-                scaler = torch.amp.GradScaler(enabled=False) # Bỏ device_type
-            except AttributeError:
+        
+        if scaler is None: 
+             try:
+                scaler = torch.amp.GradScaler(enabled=False) 
+             except AttributeError:
                 scaler = torch.cuda.amp.GradScaler(enabled=False)
 
-#        valid_src_data, valid_trg_data = self.loader._eval_data
-#        raise Exception("Initial bleu: %.3f" % bleu_batch_iter(self, self.valid_iter, debug=True))
-        local_logging.info(self)
+        logging.info(self)
         model_encoder_parameters = filter(lambda p: p.requires_grad, self.encoder.parameters())
         model_decoder_parameters = filter(lambda p: p.requires_grad, self.decoder.parameters())
         params_encode = sum([np.prod(p.size()) for p in model_encoder_parameters])
         params_decode = sum([np.prod(p.size()) for p in model_decoder_parameters])
+        logging.info(f"Encoder params: {params_encode}")
+        logging.info(f"Decoder params: {params_decode}")
+        logging.info(f"* Total trainable parameters: {params_encode + params_decode}")
+        logging.info(f"Starting training on {self.device} with AMP {'enabled' if scaler.is_enabled() else 'disabled'}")
 
-        local_logging.info("Encoder: %s"%(params_encode))
-        local_logging.info("Decoder: %s"%(params_decode))
-        local_logging.info("* Number of parameters: %s"%(params_encode+params_decode))
-        local_logging.info("Starting training on %s"%(opt.get('device', const.DEFAULT_DEVICE)))
 
-        patience_epochs_config = opt.get('early_stopping_patience', 10) # Lấy từ config
+        patience_epochs_config = opt.get('early_stopping_patience', 10) 
         patience_counter_early_stop = 0
-        # best_bleu_for_early_stopping sẽ dùng best_model_bleu_score đã load ở trên
         
+        for epoch in range(current_epoch_start_index, opt['epochs']):
+            logging.info(f"--- Starting Epoch {epoch + 1}/{opt['epochs']} ---")
+            total_train_loss_epoch = 0.0
+            epoch_start_time = time.time()
+            
+            self.train() 
 
-        for epoch in range(checkpoint_idx, opt['epochs']):
-            total_loss = 0.0
-            
-            s = time.time()
-            for i, batch in enumerate(self.train_iter): 
-                loss = self.train_step(optimizer, batch, criterion, scaler)
-                total_loss += loss
+            for i, batch in enumerate(self.train_iter):
+                loss_step = self.train_step(optimizer, batch, criterion, scaler)
+                total_train_loss_epoch += loss_step
                 
-                # print training loss after every {printevery} steps
                 if (i + 1) % opt['printevery'] == 0:
-                    avg_loss = total_loss / opt['printevery']
-                    et = time.time() - s
-                    # print('epoch: {:03d} - iter: {:05d} - train loss: {:.4f} - time elapsed/per batch: {:.4f} {:.4f}'.format(epoch, i+1, avg_loss, et, et / opt['printevery']))
-                    local_logging.info('epoch: {:03d} - iter: {:05d} - train loss: {:.4f} - time elapsed/per batch: {:.4f} {:.4f}'.format(epoch, i+1, avg_loss, et, et / opt['printevery']))
-                    total_loss = 0
-                    s = time.time()
-            
-            # bleu calculation and evaluate, save checkpoint for every {save_checkpoint_epochs} epochs
-            eval_start_time = time.time()
+                    avg_loss_print = total_train_loss_epoch / opt['printevery'] if opt['printevery'] > 0 else total_train_loss_epoch
+                    elapsed_print = time.time() - epoch_start_time 
+                    current_lr = optimizer._optimizer.param_groups[0]['lr']
+                    logging.info(f'Epoch: {epoch+1:03d} - Iter: {i+1:05d}/{len(self.train_iter)} - Train Loss: {avg_loss_print:.4f} - LR: {current_lr:.6e} - Elapsed: {elapsed_print:.2f}s')
+                    total_train_loss_epoch = 0 
+                    epoch_start_time = time.time()
+
+            self.eval() 
+
+            epoch_start_time = time.time()
             valid_loss_epoch = self.validate(self.valid_iter, criterion, maximum_length=(self.encoder._max_seq_length, self.decoder._max_seq_length))
-            current_epoch_bleu_score = 0.0 # Khởi tạo ở đây để đảm bảo nó luôn được định nghĩa
-            default_keep_train = getattr(const, 'DEFAULT_NUM_KEEP_MODEL_TRAIN', 3)
-            default_keep_eval = getattr(const, 'DEFAULT_NUM_KEEP_MODEL_EVAL', 5)
+            
+            current_epoch_bleu_score = 0.0 
 
             if (epoch + 1) % opt['save_checkpoint_epochs'] == 0 and model_dir is not None:
                 valid_src_lang, valid_trg_lang = self.loader.language_tuple
-                current_epoch_bleu_score = bleu_batch_iter(self, self.valid_iter, src_lang=valid_src_lang, trg_lang=valid_trg_lang)
+                bleuscore = bleu_batch_iter(self, self.valid_iter, src_lang=valid_src_lang, trg_lang=valid_trg_lang)
                 
+                # Lưu checkpoint thường (ví dụ mỗi epoch)
+                # Giả sử saver.save_and_clear_model cũng lưu optimizer state nếu cần
+                # Bạn có thể cần truyền optimizer.state_dict() vào đây
                 saver.save_and_clear_model(
-                    self, model_dir, checkpoint_idx=epoch+1, # Sửa model thành self
-                    maximum_saved_model=opt.get('maximum_saved_model_train', default_keep_train)
+                    self, model_dir, checkpoint_idx=epoch+1, 
+                    maximum_saved_model=opt.get('maximum_saved_model_train', const.DEFAULT_NUM_KEEP_MODEL_TRAIN)
+                    # , optimizer_state=optimizer.state_dict() # Ví dụ nếu hàm hỗ trợ
                 )
-                local_logging.info(f'Epoch: {epoch+1:03d} - Valid Loss: {valid_loss_epoch:.4f} - BLEU Score: {current_epoch_bleu_score:.4f} - Eval Time: {time.time() - eval_start_time:.2f}s')
+                # Hàm save_model_best_to_path sẽ quản lý list_of_historical_best_scores
+                # (thêm điểm mới, loại bỏ điểm cũ nếu list đầy, sắp xếp, và lưu lại list vào file)
+                # và trả về điểm BLEU cao nhất MỚI (float) trong danh sách đó.
+                best_model_score = saver.save_model_best_to_path(
+                    self, model_dir, 
+                    best_model_score, # Truyền list hiện tại
+                    bleuscore,       # Điểm BLEU của epoch này
+                    maximum_saved_model=opt.get('maximum_saved_model_eval', const.DEFAULT_NUM_KEEP_MODEL_TRAIN)
+                    # , optimizer_state=optimizer.state_dict() # Ví dụ nếu hàm hỗ trợ
+                )
 
-                if current_epoch_bleu_score > best_model_bleu_score:
-                    best_model_bleu_score = current_epoch_bleu_score 
-                    saver.save_model_best_to_path(
-                        self, model_dir, # Sửa model thành self
-                        best_model_bleu_score, # Đây là điểm BLEU tốt nhất mới
-                        current_epoch_bleu_score, # Điểm BLEU của epoch hiện tại (dùng để so sánh trong saver nếu cần)
-                        maximum_saved_model=opt.get('maximum_saved_model_eval', default_keep_eval)
-                    )
-                    local_logging.info(f"  *** NEW BEST BLEU: {best_model_bleu_score:.4f}. Saved best model for epoch {epoch+1}. ***")
+                logging.info(f'Epoch: {epoch+1:03d} - Valid Loss: {valid_loss_epoch:.4f} - BLEU Score: {bleuscore:.4f} - Eval Time: {time.time() - epoch_start_time:.2f}s')
+
+                
+                # Cập nhật best_bleu_for_comparison để dùng cho logic early stopping của epoch tiếp theo
+                new_overall_best_from_list = max(best_model_score) if best_model_score else -float('inf')
+
+                if new_overall_best_from_list > best_bleu_for_comparison:
+                    logging.info(f"  *** NEW OVERALL BEST BLEU: {new_overall_best_from_list:.4f} (Epoch {epoch+1} BLEU: {bleuscore:.4f}). Model for this epoch might be among the best. ***")
+                    best_bleu_for_comparison = new_overall_best_from_list # Cập nhật cho lần so sánh ở epoch sau
                     patience_counter_early_stop = 0 
                 else:
                     patience_counter_early_stop += 1
-                    local_logging.info(f"  EarlyStopping: BLEU không cải thiện ({current_epoch_bleu_score:.4f} vs best {best_model_bleu_score:.4f}). Patience: {patience_counter_early_stop}/{patience_epochs_config}")
+                    # Log so sánh điểm hiện tại với điểm tốt nhất đã biết (best_bleu_for_comparison)
+                    logging.info(f"  EarlyStopping: Current epoch BLEU ({bleuscore:.4f}) did not improve overall best BLEU ({best_bleu_for_comparison:.4f}). Patience: {patience_counter_early_stop}/{patience_epochs_config}")
                 
                 if patience_counter_early_stop >= patience_epochs_config:
-                    local_logging.info(f"EARLY STOPPING: Kích hoạt tại epoch {epoch+1} do BLEU không cải thiện sau {patience_epochs_config} lần đánh giá liên tiếp.")
-                    local_logging.info(f"BLEU tốt nhất đạt được: {best_model_bleu_score:.4f}")
+                    logging.info(f"EARLY STOPPING: Kích hoạt tại epoch {epoch+1} do BLEU không cải thiện so với overall best sau {patience_epochs_config} lần đánh giá liên tiếp.")
+                    logging.info(f"BLEU tốt nhất đạt được trong quá trình huấn luyện này: {best_bleu_for_comparison:.4f}")
                     break 
             else: 
-                local_logging.info(f'Epoch: {epoch+1:03d} - Valid Loss: {valid_loss_epoch:.4f} - Validation Time (loss only): {time.time() - eval_start_time:.2f}s')
+                logging.info(f'Epoch: {epoch+1:03d} - Valid Loss: {valid_loss_epoch:.4f} - Validation Time (loss only): {time.time() - epoch_start_time:.2f}s')
 
 
-        local_logging.info("Hoàn tất quá trình huấn luyện.")
-        local_logging.info(f"Model tốt nhất (BLEU: {best_model_bleu_score:.4f}) đã được lưu tại {model_dir} (thường có tên chứa 'best').")
+
+        self.local_logging.info("Hoàn tất quá trình huấn luyện.")
+        self.local_logging.info(f"Model tốt nhất dựa trên BLEU (overall): {best_bleu_for_comparison:.4f}) đã được lưu tại {model_dir} (thường có tên chứa 'best').")
 
     def run_infer(self, features_file, predictions_file, src_lang=None, trg_lang=None, config=None, batch_size=None):
         opt = self.config
