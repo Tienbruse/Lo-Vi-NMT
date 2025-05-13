@@ -145,9 +145,9 @@ class Transformer(nn.Module):
         src_mask, trg_mask = create_masks(src, trg_input, src_pad, trg_pad, opt.get('device', const.DEFAULT_DEVICE))
        
         
-        with torch.cuda.amp.autocast(enabled=True):
-            preds = self(src, trg_input, src_mask, trg_mask) # Forward pass
-            loss = criterion(preds.view(-1, preds.size(-1)), ys) # Tính loss
+        with torch.amp.autocast(device_type='cuda', dtype=torch.float16, enabled=opt.get('use_amp', True)):
+            preds = self(src, trg_input, src_mask, trg_mask)
+            loss = criterion(preds.view(-1, preds.size(-1)), ys)
         
         # Scale loss và thực hiện backward pass với scaler
         scaler.scale(loss).backward()
@@ -302,7 +302,21 @@ class Transformer(nn.Module):
         criterion = LabelSmoothingLoss(len(self.TRG.vocab), padding_idx=trg_pad, smoothing=opt['label_smoothing'])
 
         use_amp_flag = opt.get('use_amp', True) # Lấy từ config, mặc định là True
-        scaler = torch.cuda.amp.GradScaler(enabled=use_amp_flag)
+        if use_amp_flag and torch.cuda.is_available():
+            try:
+                # Ưu tiên API mới nếu PyTorch version hỗ trợ
+                scaler = torch.amp.GradScaler(device_type='cuda', enabled=True)
+            except AttributeError: 
+                # Fallback cho phiên bản PyTorch cũ hơn
+                scaler = torch.cuda.amp.GradScaler(enabled=True)
+        else:
+            # Tạo một dummy scaler nếu AMP không được dùng hoặc không có CUDA
+            # Điều này giúp code chạy mà không cần if/else scaler ở nhiều nơi
+            # nhưng GradScaler(enabled=False) sẽ không làm gì cả.
+            try:
+                scaler = torch.amp.GradScaler(device_type='cuda', enabled=False)
+            except AttributeError:
+                scaler = torch.cuda.amp.GradScaler(enabled=False)
 
 #        valid_src_data, valid_trg_data = self.loader._eval_data
 #        raise Exception("Initial bleu: %.3f" % bleu_batch_iter(self, self.valid_iter, debug=True))

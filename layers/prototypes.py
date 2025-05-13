@@ -104,7 +104,7 @@ class MultiHeadAttention(nn.Module):
         scores = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(self.d_k)
         if mask is not None:
             mask = mask.unsqueeze(1) # add a dimension to account for head
-            scores = scores.masked_fill(mask==0, -1e9)
+            scores = scores.masked_fill(mask == 0, torch.finfo(scores.dtype).min)
         # softmax the padding/peeking masked attention
         scores = functional.softmax(scores, dim=-1)
         
