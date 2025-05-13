@@ -287,7 +287,7 @@ class Transformer(nn.Module):
             raise ValueError("Unknown optimizer: {}".format(optim_algo))
         
         # Khởi tạo optimizer PyTorch gốc trước
-        pytorch_optimizer_instance = optimizers.get(optim_algo_name)(model.parameters(), lr=lr_factor_or_init_lr, **optimizer_custom_params)
+        pytorch_optimizer_instance = optimizers.get(optim_algo)(model.parameters(), lr=lr, **optimizer_params)
         # Lưu ý: lr ban đầu cho optimizer gốc có thể không quá quan trọng vì ScheduledOptim sẽ ghi đè nó ngay.
         
         
