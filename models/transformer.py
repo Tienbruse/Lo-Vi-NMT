@@ -327,7 +327,7 @@ class Transformer(nn.Module):
             
             s = time.time()
             for i, batch in enumerate(self.train_iter): 
-                loss = self.train_step(optimizer, batch, criterion)
+                loss = self.train_step(optimizer, batch, criterion, scaler)
                 total_loss += loss
                 
                 # print training loss after every {printevery} steps
