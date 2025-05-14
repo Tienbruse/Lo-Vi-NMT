@@ -114,22 +114,30 @@ class MultiHeadAttention(nn.Module):
         output = torch.matmul(scores, v)
         return output, scores
 
-class Norm(nn.Module):
-    def __init__(self, d_model, eps = 1e-6):
+# class Norm(nn.Module):
+#     def __init__(self, d_model, eps = 1e-6):
+#         super().__init__()
+    
+#         self.size = d_model
+        
+#         # create two learnable parameters to calibrate normalisation
+#         self.alpha = nn.Parameter(torch.ones(self.size))
+#         self.bias = nn.Parameter(torch.zeros(self.size))
+        
+#         self.eps = eps
+    
+#     def forward(self, x):
+#         norm = self.alpha * (x - x.mean(dim=-1, keepdim=True)) \
+#         / (x.std(dim=-1, keepdim=True) + self.eps) + self.bias
+#         return norm
+
+class PreNorm(nn.Module):
+    """LayerNorm trước mỗi sub-layer"""
+    def __init__(self, d_model, eps=1e-6):
         super().__init__()
-    
-        self.size = d_model
-        
-        # create two learnable parameters to calibrate normalisation
-        self.alpha = nn.Parameter(torch.ones(self.size))
-        self.bias = nn.Parameter(torch.zeros(self.size))
-        
-        self.eps = eps
-    
+        self.norm = nn.LayerNorm(d_model, eps=eps)
     def forward(self, x):
-        norm = self.alpha * (x - x.mean(dim=-1, keepdim=True)) \
-        / (x.std(dim=-1, keepdim=True) + self.eps) + self.bias
-        return norm
+        return self.norm(x)
 
 class FeedForward(nn.Module):
     """A two-hidden-linear feedforward layer that can activate and dropout its transition state"""
